@@ -1,0 +1,5 @@
+httpx
+pydantic
+python-dotenv
+mysql-connector-python
+python-telegram-bot[job-queue]
