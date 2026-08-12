@@ -1,6 +1,8 @@
 import os
 import asyncio
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update
@@ -27,12 +29,30 @@ ARGENTINA_LOTBA_BOOKMAKERS = ["Betsson", "Codere", "Betano", "Sportsbet", "Coolb
 MIN_TARGET_ODDS = 3.00
 
 
+# --- MINI SERVIDOR HTTP PARA PLAN GRATUITO EN RENDER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot cuantitativo de River Plate OK")
+
+    def log_message(self, format, *args):
+        return  # Desactivar logs ruidosos del servidor HTTP
+
+
+def start_dummy_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logging.info(f"🌐 Servidor Web de salud iniciado en puerto {port}")
+    server.serve_forever()
+
+
 def calculate_ev(real_prob: float, odds: float) -> float:
     return (real_prob * odds) - 1.0
 
 
 def build_combinations_catalog() -> list[dict]:
-    """Catálogo de mercados y combinadas distintas a evaluar."""
     return [
         {
             "name": "River Gana sin recibir goles (A Valla Invicta)",
@@ -109,7 +129,6 @@ async def analyze_river_matches():
         matrix = generate_score_matrix(lambda_river, lambda_rival)
         unique_market_bets = []
 
-        # Evaluar cada tipo de mercado del catálogo y seleccionar la mejor casa para cada uno
         for item in combo_catalog:
             prob_joint = evaluate_market_combination(matrix, item["conds"])
             best_offer_for_market = None
@@ -120,7 +139,6 @@ async def analyze_river_matches():
 
                 odds_river_1x2 = bm.home_win if is_home else bm.away_win
                 
-                # Guardar historial de cuotas 1X2
                 odds_movement = save_odds_history(match_title, bm.bookmaker, odds_river_1x2)
                 if odds_movement:
                     movement_alerts.append(f"⚽ *{match_title}* en *{bm.bookmaker}*:\n{odds_movement}")
@@ -152,7 +170,6 @@ async def analyze_river_matches():
             if best_offer_for_market:
                 unique_market_bets.append(best_offer_for_market)
 
-        # Ordenar los distintos mercados por Valor Esperado (+EV) descendente
         unique_market_bets.sort(key=lambda x: x["ev"], reverse=True)
 
         if unique_market_bets:
@@ -299,6 +316,9 @@ def main():
         logging.error("TELEGRAM_BOT_TOKEN no configurado en el archivo .env")
         return
 
+    # Iniciar mini servidor web en segundo plano
+    threading.Thread(target=start_dummy_server, daemon=True).start()
+
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", start_command))
@@ -310,7 +330,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(background_monitoring_job, interval=1800, first=10)
 
-    logging.info("🤖 BOT DE MERCADOS DIVERSIFICADOS DE RIVER PLATE INICIADO.")
+    logging.info("🤖 BOT ANALIZADOR DE RIVER PLATE (CON SERVIDOR DE SALUD PARA RENDER) INICIADO.")
     app.run_polling()
 
 
