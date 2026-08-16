@@ -30,7 +30,7 @@ except Exception:
         get_river_analysis_message = None
 
 
-# Servidor HTTP para UptimeRobot
+# Servidor HTTP para pings de UptimeRobot (GET y HEAD)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -53,7 +53,6 @@ def run_http_server():
     server.serve_forever()
 
 
-# Teclado persistente inferior
 def get_main_keyboard():
     keyboard = [
         [KeyboardButton("⚪🔴 Ver Cuotas"), KeyboardButton("📊 Mi Balance")],
@@ -62,7 +61,6 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
-# Inline Keyboard para resolver apuestas
 def get_resolve_buttons(bet_id: int):
     return InlineKeyboardMarkup([
         [
@@ -80,7 +78,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "║  ⚪🔴 *PANEL DE CONTROL - RIVER PLATE* ║\n"
         "╚══════════════════════════════════════╝\n\n"
         "🎯 *Accesos Rápidos:*\n"
-        "• Usá los botones táctiles del teclado inferior.\n"
+        "• Usá los botones del teclado inferior.\n"
         "• O desplegá el botón *Menú* junto al chat.\n\n"
         "📝 *Para registrar apuestas:*\n"
         "`/registrar <jugada> <cuota> <monto>`\n"
@@ -125,20 +123,27 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = get_performance_summary()
     profit = stats.get("total_profit", 0.0)
     profit_symbol = "🟢" if profit >= 0 else "🔴"
+    status_text = "En Ganancias" if profit >= 0 else "En Pérdidas"
+
+    total_bets_str = str(stats.get("total_bets", 0)).rjust(20)
+    win_rate_str = f"{stats.get('win_rate', 0.0):.1f}%".rjust(20)
+    staked_str = f"${stats.get('total_staked', 0.0):,.2f}".rjust(20)
+    profit_str = f"${profit:,.2f}".rjust(20)
+    yield_str = f"{stats.get('yield_percentage', 0.0):+.2f}%".rjust(20)
 
     msg = (
         "```text\n"
         "╔════════════════════════════════════════════╗\n"
         "║     📊  BALANCE Y RENDIMIENTO HISTÓRICO    ║\n"
         "╠════════════════════════════════════════════╣\n"
-        f"║  Apuestas Resueltas : {str(stats.get('total_bets', 0)).rjust(20)} ║\n"
-        f"║  Tasa de Acierto    : {f'{stats.get(\"win_rate\", 0.0):.1f}%'.rjust(20)} ║\n"
-        f"║  Total Invertido    : {f'${stats.get(\"total_staked\", 0.0):,.2f}'.rjust(20)} ║\n"
-        f"║  Beneficio Neto     : {f'${profit:,.2f}'.rjust(20)} ║\n"
-        f"║  Yield / ROI Total  : {f'{stats.get(\"yield_percentage\", 0.0):+.2f}%'.rjust(20)} ║\n"
+        f"║  Apuestas Resueltas : {total_bets_str} ║\n"
+        f"║  Tasa de Acierto    : {win_rate_str} ║\n"
+        f"║  Total Invertido    : {staked_str} ║\n"
+        f"║  Beneficio Neto     : {profit_str} ║\n"
+        f"║  Yield / ROI Total  : {yield_str} ║\n"
         "╚════════════════════════════════════════════╝\n"
         "```\n"
-        f"{profit_symbol} *Estado del Portafolio:* `{'En Ganancias' if profit >= 0 else 'En Pérdidas'}`"
+        f"{profit_symbol} *Estado del Portafolio:* `{status_text}`"
     )
     await update.message.reply_text(msg, reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
@@ -157,14 +162,21 @@ async def pendientes_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     for bet in pending:
         retorno = bet['stake'] * bet['odds']
+        ticket_id = str(bet['id']).ljust(4)
+        bkm = bet['bookmaker'].ljust(12)
+        sel = bet['selection'][:32].ljust(32)
+        odd_str = f"@{bet['odds']:.2f}".ljust(14)
+        stk_str = f"Stake: ${bet['stake']:,.2f}".rjust(15)
+        ret_str = f"${retorno:,.2f}"
+
         ticket = (
             "```text\n"
             "┌────────────────────────────────────────────┐\n"
-            f"│  TICKET #{str(bet['id']).ljust(4)}         Casa: {bet['bookmaker'].ljust(12)}│\n"
+            f"│  TICKET #{ticket_id}         Casa: {bkm}│\n"
             "├────────────────────────────────────────────┤\n"
-            f"│  Jugada : {bet['selection'][:32].ljust(32)} │\n"
-            f"│  Cuota  : @{bet['odds']:.2f}".ljust(25) + f"Stake: ${bet['stake']:,.2f}".rjust(20) + " │\n"
-            f"│  Retorno Potencial: ${retorno:,.2f}".ljust(44) + " │\n"
+            f"│  Jugada : {sel} │\n"
+            f"│  Cuota  : {odd_str}{stk_str} │\n"
+            f"│  Retorno Potencial: {ret_str.ljust(22)} │\n"
             "└────────────────────────────────────────────┘\n"
             "```"
         )
@@ -199,17 +211,24 @@ async def registrar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bet_id = record_bet("River Plate", selection, bookmaker, odds, 0.0, stake)
 
         if bet_id > 0:
+            ticket_id = str(bet_id).ljust(29)
+            bkm = bookmaker.ljust(30)
+            sel = selection[:30].ljust(30)
+            odd_str = f"{odds:.2f}".ljust(29)
+            stk_str = f"${stake:,.2f}".ljust(30)
+            ret_str = f"${retorno:,.2f}".ljust(30)
+
             ticket = (
                 "```text\n"
                 "╔════════════════════════════════════════════╗\n"
                 "║         ✅  NUEVA APUESTA REGISTRADA        ║\n"
                 "╠════════════════════════════════════════════╣\n"
-                f"║  ID Ticket : #{str(bet_id).ljust(29)} ║\n"
-                f"║  Casa      : {bookmaker.ljust(30)} ║\n"
-                f"║  Selección : {selection[:30].ljust(30)} ║\n"
-                f"║  Cuota     : @{f'{odds:.2f}'.ljust(29)} ║\n"
-                f"║  Inversión : {f'${stake:,.2f}'.ljust(30)} ║\n"
-                f"║  Retorno   : {f'${retorno:,.2f}'.ljust(30)} ║\n"
+                f"║  ID Ticket : #{ticket_id} ║\n"
+                f"║  Casa      : {bkm} ║\n"
+                f"║  Selección : {sel} ║\n"
+                f"║  Cuota     : @{odd_str} ║\n"
+                f"║  Inversión : {stk_str} ║\n"
+                f"║  Retorno   : {ret_str} ║\n"
                 "╚════════════════════════════════════════════╝\n"
                 "```"
             )
@@ -226,7 +245,6 @@ async def registrar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Error: `{e}`", parse_mode="Markdown")
 
 
-# Manejador de clics en botones Inline
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -249,7 +267,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text(f"⚠️ Error al actualizar ticket `#{bet_id}`.")
 
 
-# Manejador de clics en el teclado inferior
 async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "⚪🔴 Ver Cuotas":
@@ -262,10 +279,9 @@ async def text_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_command(update, context)
 
 
-# Registrar menú nativo oficial de Telegram
 async def post_init(application: Application):
     commands = [
-        BotCommand("start", "Menú principal y botones de control"),
+        BotCommand("start", "Menú principal y botones"),
         BotCommand("cuotas", "Análisis Poisson y cuotas >= 3.00"),
         BotCommand("pendientes", "Listar y resolver apuestas abiertas"),
         BotCommand("balance", "Métricas, ganancias y ROI total"),
@@ -291,7 +307,7 @@ def main():
     app.add_handler(CommandHandler("pendientes", pendientes_command))
     app.add_handler(CommandHandler("registrar", registrar_command))
 
-    # Interacción táctil
+    # Botones e interacción
     app.add_handler(CallbackQueryHandler(button_callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu_handler))
 
