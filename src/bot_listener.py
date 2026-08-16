@@ -6,7 +6,6 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
 
-# Cargar variables de entorno
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -59,9 +58,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "⚪🔴 *Bot de Apuestas - River Plate*\n\n"
         "Comandos disponibles:\n"
-        "• `/cuotas` ➔ Análisis Poisson y variantes de valor (Odds ≥ 3.00)\n"
+        "• `/cuotas` ➔ Análisis Poisson y variantes (Odds ≥ 3.00)\n"
         "• `/balance` ➔ Rendimiento acumulado y estadísticas\n"
-        "• `/registrar <casa> <cuota> <monto>` ➔ Guardar apuesta efectuada\n"
+        "• `/registrar <apuesta> <cuota> <monto>` ➔ Guardar jugada en Bet365\n"
         "• `/resolver <id> <WIN|LOSS|VOID>` ➔ Cerrar apuesta"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -78,7 +77,7 @@ async def cuotas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "• *Próximo Partido:* River Plate vs. Rival\n"
                 "• *Variante sugerida:* River gana & Más de 2.5 goles\n"
-                "• *Cuota promedio:* `3.40`\n"
+                "• *Cuota:* `3.40`\n"
                 "• *Valor Esperado (EV+):* `+8.5%`\n"
                 "• *Stake sugerido (Kelly 1/4):* `1.8%` de Bankroll\n"
             )
@@ -114,20 +113,40 @@ async def registrar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
         if len(args) < 3:
-            await update.message.reply_text("Uso: `/registrar <Casa> <Cuota> <Monto>`\nEj: `/registrar Betsson 3.40 1000`", parse_mode="Markdown")
+            await update.message.reply_text(
+                "Uso:\n`/registrar <descripción de la jugada> <cuota> <monto>`\n\n"
+                "Ejemplo:\n`/registrar gana river ambas mitades 6 15`",
+                parse_mode="Markdown"
+            )
             return
 
-        bookmaker = args[0]
-        odds = float(args[1])
-        stake = float(args[2])
-        bet_id = record_bet("River Plate", "Variante Sugerida", bookmaker, odds, 8.0, stake)
+        # Los dos últimos parámetros son cuota y monto
+        stake = float(args[-1])
+        odds = float(args[-2])
+        selection = " ".join(args[:-2])
+        bookmaker = "Bet365"
+
+        bet_id = record_bet("River Plate", selection, bookmaker, odds, 0.0, stake)
 
         if bet_id > 0:
-            await update.message.reply_text(f"✅ Apuesta registrada con ID `#{bet_id}` (Monto: `${stake:,.2f}` a cuota `{odds:.2f}`)", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"✅ *Apuesta registrada en {bookmaker}*\n"
+                f"• ID: `#{bet_id}`\n"
+                f"• Selección: *{selection}*\n"
+                f"• Cuota: `{odds:.2f}`\n"
+                f"• Monto: `${stake:,.2f}`",
+                parse_mode="Markdown"
+            )
         else:
             await update.message.reply_text("⚠️ Error al registrar en Supabase.")
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Los dos últimos valores deben ser numéricos (cuota y monto).\n"
+            "Ejemplo: `/registrar gana river ambas mitades 6 15`",
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Error en los parámetros: `{e}`", parse_mode="Markdown")
+        await update.message.reply_text(f"⚠️ Error: `{e}`", parse_mode="Markdown")
 
 
 async def resolver_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,11 +174,9 @@ def main():
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN no configurado en variables de entorno.")
 
-    # Servidor de pings HTTP
     web_thread = threading.Thread(target=run_http_server, daemon=True)
     web_thread.start()
 
-    # Bot de Telegram
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("cuotas", cuotas_command))
