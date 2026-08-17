@@ -1,6 +1,5 @@
-httpx
-pydantic
+python-telegram-bot[job-queue]
 python-dotenv
 psycopg2-binary
-python-telegram-bot[job-queue]
+pydantic
 httpx
