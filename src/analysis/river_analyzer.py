@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 def get_river_analysis_message() -> str:
     """
     Ejecuta el análisis predictivo cuantitativo para River Plate y genera el ticket
-    desglosando todas las selecciones que componen el Same Game Parlay (+EV).
+    desglosando limpiamente las selecciones del Same Game Parlay (+EV).
     """
     try:
         matches = _get_mock_river_matches()
@@ -27,20 +27,25 @@ def get_river_analysis_message() -> str:
         sgp = report.get("same_game_parlay")
         ev_bets = report.get("ev_plus_bets", [])
 
-        # Extraer selecciones del Parlay
+        # Extraer limpiamente los nombres de las apuestas recomendadas
         legs_list = []
-        if sgp and hasattr(sgp, "legs"):
-            for leg in sgp.legs:
-                name = getattr(leg, "bet_type", getattr(leg, "selection", str(leg)))
-                legs_list.append(name)
-        elif sgp and hasattr(sgp, "recommendations"):
-            for rec in sgp.recommendations:
-                legs_list.append(getattr(rec, "bet_type", str(rec)))
+        if sgp:
+            recs = getattr(sgp, "recommendations", getattr(sgp, "legs", []))
+            for rec in recs:
+                # Intentar extraer el atributo market_name o bet_type según el esquema
+                name = getattr(rec, "market_name", getattr(rec, "bet_type", None))
+                if not name and hasattr(rec, "__dict__"):
+                    # Buscar en los campos internos del objeto pydantic
+                    for k, v in rec.__dict__.items():
+                        if "name" in k or "type" in k:
+                            name = str(v)
+                            break
+                if name:
+                    legs_list.append(name)
 
         if not legs_list:
-            # Si no hay lista explícita, desglosar las variables evaluadas con valor
             legs_list = [
-                f"Victoria de {match.away_team if 'River' in match.away_team else match.home_team}",
+                f"Victoria de {match.away_team}",
                 "Más de 2.5 Goles Totales",
                 "Más de 9.5 Córners Totales",
             ]
@@ -56,10 +61,11 @@ def get_river_analysis_message() -> str:
         home_label = f"Victoria {match.home_team[:8]}".ljust(18)
         away_label = f"Victoria {match.away_team[:8]}".ljust(18)
 
-        # Formatear el bloque de patas combinadas
         legs_formatted = ""
         for i, leg in enumerate(legs_list[:4], 1):
-            leg_str = f" {i}. {leg}"[:40].ljust(40)
+            # Limpiar por si quedó algún prefijo residual de objeto
+            clean_leg = leg.replace("market_name=", "").replace("'", "").strip()
+            leg_str = f" {i}. {clean_leg}"[:40].ljust(40)
             legs_formatted += f"║ {leg_str}   ║\n"
 
         msg = (
