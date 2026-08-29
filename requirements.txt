@@ -2,4 +2,8 @@ python-telegram-bot[job-queue]
 python-dotenv
 psycopg2-binary
 pydantic
+pydantic-settings
 httpx
+numpy
+pymysql
+cryptography
