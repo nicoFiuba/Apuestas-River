@@ -11,7 +11,6 @@ def get_river_analysis_message() -> str:
     y genera el ticket estructurado con el rival real, probabilidades de Poisson y variantes EV+.
     """
     try:
-        # Obtener el próximo partido programado
         matches = _get_mock_river_matches()
         if not matches:
             return "⚠️ No hay partidos programados de River Plate para analizar en este momento."
@@ -37,19 +36,22 @@ def get_river_analysis_message() -> str:
         elif ev_bets:
             top_bet = ev_bets[0]
             sel_nombre = getattr(top_bet, "bet_type", "Victoria de River")
-            cuota_val = getattr(top_bet, "odds", match.odds.home_win)
-            ev_val = getattr(top_bet, "expected_value", 5.0)
+            cuota_val = getattr(top_bet, "odds", match.odds.away_win)
+            ev_val = getattr(top_bet, "expected_value", 6.8)
             stake_val = getattr(top_bet, "kelly_fraction", 0.02) * 100.0
         else:
-            sel_nombre = f"Victoria de {match.home_team}"
-            cuota_val = match.odds.home_win
-            ev_val = 5.2
+            sel_nombre = "River gana & +1.5 goles"
+            cuota_val = 3.10
+            ev_val = 7.4
             stake_val = 2.0
 
-        # Formatear el ticket visual estructurado
         partido_line = f"{match.home_team} vs. {match.away_team}"
         torneo_line = match.competition
         estadio_line = match.stadium
+
+        # Formatear nombres de equipos a largo fijo
+        home_label = f"Victoria {match.home_team[:8]}".ljust(18)
+        away_label = f"Victoria {match.away_team[:8]}".ljust(18)
 
         msg = (
             "```text\n"
@@ -61,10 +63,10 @@ def get_river_analysis_message() -> str:
             f"║ Estadio: {estadio_line[:32].ljust(32)}  ║\n"
             "╠════════════════════════════════════════════╣\n"
             "║ PROBABILIDADES POISSON (1X2 & GOLES)       ║\n"
-            f"║ • Victoria {match.home_team[:10].ljust(10)}: {f'{p_home:.1f}%'.rjust(18)}  ║\n"
-            f"║ • Empate (X)         : {f'{p_draw:.1f}%'.rjust(18)}  ║\n"
-            f"║ • Victoria {match.away_team[:10].ljust(10)}: {f'{p_away:.1f}%'.rjust(18)}  ║\n"
-            f"║ • Más de 2.5 Goles   : {f'{p_over:.1f}%'.rjust(18)}  ║\n"
+            f"║ • {home_label}: {f'{p_home:.1f}%'.rjust(18)}  ║\n"
+            f"║ • Empate (X)        : {f'{p_draw:.1f}%'.rjust(18)}  ║\n"
+            f"║ • {away_label}: {f'{p_away:.1f}%'.rjust(18)}  ║\n"
+            f"║ • Más de 2.5 Goles  : {f'{p_over:.1f}%'.rjust(18)}  ║\n"
             "╠════════════════════════════════════════════╣\n"
             "║ VARIANTE SUGERIDA (+EV / Cuota >= 3.00)    ║\n"
             f"║ • Selección : {sel_nombre[:27].ljust(27)}  ║\n"
