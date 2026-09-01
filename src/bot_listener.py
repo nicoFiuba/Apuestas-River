@@ -1,12 +1,12 @@
 """
-Módulo principal del Bot de Telegram con servidor HTTP embebido para Render y UptimeRobot.
+Módulo principal del Bot de Telegram conectado con src.db.tracker y servidor HTTP de salud.
 """
 
 import os
 import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,7 +14,12 @@ from telegram.ext import (
     ContextTypes,
 )
 from src.analysis.river_analyzer import get_river_analysis_message
-from src.db import tracker
+from src.db.tracker import (
+    record_bet,
+    resolve_bet,
+    get_pending_bets,
+    get_performance_summary,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -40,12 +45,11 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        # Silenciar logs recurrentes de UptimeRobot
         return
 
 
 def start_health_check_server():
-    """Inicia un servidor HTTP en segundo plano para responder a UptimeRobot y Render."""
+    """Inicia servidor en background para Render."""
     port = int(os.getenv("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     logger.info(f"Servidor de Health Check iniciado en el puerto {port}")
@@ -53,11 +57,11 @@ def start_health_check_server():
 
 
 # ---------------------------------------------------------------------------
-# COMANDOS DE TELEGRAM
+# HANDLERS DE COMANDOS
 # ---------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start y /ayuda: Mensaje de bienvenida y guía de comandos."""
+    """Guía de comandos disponibles."""
     msg = (
         "⚪🔴 *BOT CUANTITATIVO RIVER PLATE | BET365*\n\n"
         "Comandos disponibles:\n"
@@ -72,7 +76,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cuotas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /cuotas: Ejecuta el modelo predictivo de Poisson y constructor SGP."""
+    """Ejecuta el cálculo Poisson y constructor SGP."""
     wait_msg = await update.message.reply_text("🔍 _Analizando mercado y calculando matriz de Poisson..._", parse_mode="Markdown")
     try:
         report = get_river_analysis_message()
@@ -83,7 +87,7 @@ async def cuotas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def registrar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /registrar: Guarda una apuesta protegiendo contra parámetros vacíos o inválidos."""
+    """Guarda la apuesta usando record_bet de tracker.py."""
     try:
         if not update.message or not update.message.text:
             return
@@ -123,24 +127,24 @@ async def registrar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ La cuota y el monto deben ser números válidos (ejemplo: `8.50 15`).")
             return
 
-        # Guardado seguro en Supabase
-        success = False
+        # Inserción en Supabase / PostgreSQL con record_bet
         try:
-            if hasattr(tracker, "registrar_apuesta"):
-                success = tracker.registrar_apuesta(jugada, cuota, monto)
-            elif hasattr(tracker, "register_bet"):
-                success = tracker.register_bet(jugada, cuota, monto)
-            elif hasattr(tracker, "save_bet"):
-                success = tracker.save_bet(jugada, cuota, monto)
-            else:
-                success = True
+            bet_id = record_bet(
+                match_name="River Plate vs. Rival",
+                selection=jugada,
+                bookmaker="Bet365",
+                odds=cuota,
+                ev_percentage=0.0,
+                stake_ars=monto,
+            )
+            success = bool(bet_id)
         except Exception as db_err:
-            logger.error(f"Error al interactuar con Supabase: {db_err}")
+            logger.error(f"Error en record_bet: {db_err}")
             success = False
 
-        if success or success is None:
+        if success:
             await update.message.reply_text(
-                f"✅ *Apuesta registrada con éxito*\n\n"
+                f"✅ *Apuesta registrada con éxito (ID: #{bet_id})*\n\n"
                 f"• *Jugada:* `{jugada}`\n"
                 f"• *Cuota:* `@{cuota:.2f}`\n"
                 f"• *Monto:* `${monto:.2f}`\n"
@@ -148,7 +152,7 @@ async def registrar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
         else:
-            await update.message.reply_text("⚠️ Error al registrar en Supabase. Verificá las variables de conexión.")
+            await update.message.reply_text("⚠️ Error al registrar en la base de datos.")
 
     except Exception as e:
         logger.error(f"Error inesperado en /registrar: {e}")
@@ -156,35 +160,34 @@ async def registrar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def pendientes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /pendientes: Muestra apuestas abiertas con botones de resolución."""
+    """Muestra apuestas pendientes con botones de resolución (resolve_bet)."""
     try:
-        bets = []
-        if hasattr(tracker, "get_pending_bets"):
-            bets = tracker.get_pending_bets()
-        elif hasattr(tracker, "obtener_pendientes"):
-            bets = tracker.obtener_pendientes()
-
+        bets = get_pending_bets()
         if not bets:
             await update.message.reply_text("✅ No tenés apuestas pendientes por liquidar.")
             return
 
         for bet in bets:
-            bet_id = bet.get("id", "")
-            desc = bet.get("market", bet.get("jugada", "Apuesta"))
-            cuota = bet.get("odds", bet.get("cuota", 0.0))
-            monto = bet.get("stake", bet.get("monto", 0.0))
+            # Compatibilidad con dict o tuple
+            if isinstance(bet, dict):
+                b_id = bet.get("id")
+                desc = bet.get("selection", bet.get("market_name", "Apuesta"))
+                cuota = bet.get("odds", 0.0)
+                monto = bet.get("stake_ars", bet.get("stake", 0.0))
+            else:
+                b_id, desc, cuota, monto = bet[0], bet[2], bet[4], bet[6]
 
             keyboard = [
                 [
-                    InlineKeyboardButton("✅ Ganada", callback_data=f"win_{bet_id}"),
-                    InlineKeyboardButton("❌ Perdida", callback_data=f"loss_{bet_id}"),
-                    InlineKeyboardButton("⚪ Anulada", callback_data=f"void_{bet_id}"),
+                    InlineKeyboardButton("✅ Ganada", callback_data=f"win_{b_id}"),
+                    InlineKeyboardButton("❌ Perdida", callback_data=f"loss_{b_id}"),
+                    InlineKeyboardButton("⚪ Anulada", callback_data=f"void_{b_id}"),
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(
-                f"⏳ *Apuesta Pendiente:*\n"
+                f"⏳ *Apuesta Pendiente (#{b_id}):*\n"
                 f"• *Jugada:* `{desc}`\n"
                 f"• *Cuota:* `@{cuota}`\n"
                 f"• *Monto:* `${monto}`",
@@ -197,25 +200,23 @@ async def pendientes_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /balance: Muestra estadísticas de bankroll y rendimiento."""
+    """Muestra el historial consolidado usando get_performance_summary."""
     try:
-        stats = {}
-        if hasattr(tracker, "get_balance_summary"):
-            stats = tracker.get_balance_summary()
-        elif hasattr(tracker, "obtener_balance"):
-            stats = tracker.obtener_balance()
+        stats = get_performance_summary()
 
-        total_apostado = stats.get("total_stake", stats.get("total_apostado", 0.0))
-        net_profit = stats.get("net_profit", stats.get("ganancia_neta", 0.0))
-        yield_pct = stats.get("yield_percentage", stats.get("yield", 0.0))
-        total_bets = stats.get("total_bets", stats.get("apuestas_totales", 0))
+        total_bets = stats.get("total_bets", 0)
+        total_staked = stats.get("total_staked", stats.get("total_stake", 0.0))
+        net_profit = stats.get("net_profit", 0.0)
+        yield_pct = stats.get("yield_pct", stats.get("yield_percentage", 0.0))
+        win_rate = stats.get("win_rate", 0.0)
 
         msg = (
-            "💰 *RESUMEN DE BALANCE Y YIELD*\n\n"
+            "💰 *RESUMEN DE BALANCE Y HISTORIAL*\n\n"
             f"• *Apuestas Totales:* `{total_bets}`\n"
-            f"• *Total Apostado:* `${total_apostado:.2f}`\n"
+            f"• *Total Apostado:* `${total_staked:.2f}`\n"
             f"• *Ganancia Neta:* `${net_profit:+.2f}`\n"
-            f"• *Yield Acumulado:* `{yield_pct:+.2f}%`"
+            f"• *Yield Acumulado:* `{yield_pct:+.2f}%`\n"
+            f"• *Win Rate:* `{win_rate:.1f}%`"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
@@ -224,26 +225,27 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja las acciones de los botones inline en /pendientes."""
+    """Procesa el cierre de una apuesta con resolve_bet."""
     query = update.callback_query
     await query.answer()
 
     data = query.data
     try:
-        action, bet_id = data.split("_", 1)
+        action, bet_id_str = data.split("_", 1)
+        bet_id = int(bet_id_str)
         status_map = {"win": "WON", "loss": "LOST", "void": "VOID"}
         new_status = status_map.get(action, "PENDING")
 
-        if hasattr(tracker, "update_bet_status"):
-            tracker.update_bet_status(bet_id, new_status)
-        elif hasattr(tracker, "actualizar_estado_apuesta"):
-            tracker.actualizar_estado_apuesta(bet_id, new_status)
+        success = resolve_bet(bet_id, new_status)
 
-        status_text = "GANADA ✅" if action == "win" else "PERDIDA ❌" if action == "loss" else "ANULADA ⚪"
-        await query.edit_message_text(
-            f"{query.message.text}\n\n🏁 *Resultado:* `{status_text}`",
-            parse_mode="Markdown",
-        )
+        if success:
+            status_text = "GANADA ✅" if action == "win" else "PERDIDA ❌" if action == "loss" else "ANULADA ⚪"
+            await query.edit_message_text(
+                f"{query.message.text}\n\n🏁 *Resultado:* `{status_text}`",
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text("⚠️ No se pudo actualizar el estado en la base de datos.")
     except Exception as e:
         logger.error(f"Error al procesar callback: {e}")
         await query.edit_message_text(f"⚠️ Error al actualizar apuesta: `{e}`")
@@ -254,17 +256,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 def run_bot():
-    """Inicia el servidor HTTP de salud y el listener de Telegram."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("No se encontró la variable de entorno TELEGRAM_BOT_TOKEN.")
 
-    # Iniciar servidor HTTP en un hilo independiente para Render y UptimeRobot
+    # Servidor HTTP para Render
     threading.Thread(target=start_health_check_server, daemon=True).start()
 
     app = Application.builder().token(token).build()
 
-    # Handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("ayuda", start_command))
     app.add_handler(CommandHandler("cuotas", cuotas_command))
