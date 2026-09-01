@@ -1,5 +1,6 @@
 """
-Motor de análisis predictivo cuantitativo para partidos de fútbol.
+Motor de análisis predictivo cuantitativo con intensidades Poisson calculadas
+a partir de métricas xG reales de los equipos.
 """
 
 import logging
@@ -9,94 +10,90 @@ from src.analytics.poisson import (
     calculate_score_matrix,
     extract_match_probabilities,
     calculate_corner_probabilities,
+    calculate_discipline_and_fouls_probabilities,
 )
 from src.analytics.ev_calculator import BetRecommendationSchema, evaluate_bet
-from src.analytics.parlay_builder import SameGameParlaySchema, build_same_game_parlay
+from src.analytics.parlay_builder import build_same_game_parlay
 
 logger = logging.getLogger(__name__)
 
 
 def analyze_single_match(match: MatchSchema) -> dict[str, Any]:
     """
-    Ejecuta el análisis estadístico completo de un partido:
-    1. Modela intensidades Poisson (goles y córners).
-    2. Evalúa valor esperado (+EV) con alcance explícito (Ambos equipos / Local / Visitante).
-    3. Construye combinadas Same Game Parlay (SGP).
+    Calcula intensidades Poisson empíricas basadas en xG real,
+    posesión y córners para encontrar valor (+EV) con cuota >= 3.00.
     """
     try:
-        # 1. Estimación de intensidades Lambda según posesión y localía
-        is_river_away = "River" in match.away_team
-        if is_river_away:
-            lambda_home = max(0.8, 1.1 + (match.possession_home - 50) * 0.01)
-            lambda_away = max(1.0, 1.5 + (match.possession_away - 50) * 0.01)
+        is_river_home = "River" in match.home_team
+        river_name = match.home_team if is_river_home else match.away_team
+
+        # 1. Cálculo de Lambdas (Goles esperados) con xG real ponderado por localía
+        if is_river_home:
+            lambda_home = (match.river_xg_scored * 1.10 + match.rival_xg_conceded * 0.90) / 2.0
+            lambda_away = (match.rival_xg_scored * 0.85 + match.river_xg_conceded * 0.90) / 2.0
         else:
-            lambda_home = max(1.2, 1.7 + (match.possession_home - 50) * 0.01)
-            lambda_away = max(0.5, 0.9 + (match.possession_away - 50) * 0.01)
+            lambda_home = (match.rival_xg_scored * 1.10 + match.river_xg_conceded * 0.90) / 2.0
+            lambda_away = (match.river_xg_scored * 0.90 + match.rival_xg_conceded * 1.10) / 2.0
 
-        # Matriz de marcadores y probabilidades 1X2 / Over 2.5
+        # Generar matriz de marcadores Poisson
         score_matrix = calculate_score_matrix(lambda_home, lambda_away)
-        match_probs = extract_match_probabilities(score_matrix)
+        probs = extract_match_probabilities(score_matrix, is_river_away=(not is_river_home))
 
-        # Probabilidades de córners totales
-        exp_c_home = float(match.corners_home if match.corners_home > 0 else 4.5)
-        exp_c_away = float(match.corners_away if match.corners_away > 0 else 5.5)
-        corner_probs = calculate_corner_probabilities(exp_c_home, exp_c_away)
+        # Córners y disciplina
+        corner_probs = calculate_corner_probabilities(match.corners_home, match.corners_away)
+        disc_probs = calculate_discipline_and_fouls_probabilities(
+            expected_cards=match.cards_expected,
+            expected_fouls=match.fouls_expected,
+        )
 
-        # 2. Evaluación de Mercados (+EV)
         all_recommendations: list[BetRecommendationSchema] = []
 
-        rec_home = evaluate_bet(
-            f"Victoria Local ({match.home_team})",
-            float(match_probs["home_win"]),
-            float(match.odds.home_win),
-        )
-        rec_draw = evaluate_bet(
-            "Empate (X)",
-            float(match_probs["draw"]),
-            float(match.odds.draw),
-        )
-        rec_away = evaluate_bet(
-            f"Victoria Visitante ({match.away_team})",
-            float(match_probs["away_win"]),
-            float(match.odds.away_win),
-        )
-        all_recommendations.extend([rec_home, rec_draw, rec_away])
+        # 1. Resultado 1X2
+        all_recommendations.append(evaluate_bet(f"Resultado: {match.home_team}", probs["home_win"], match.odds.home_win))
+        all_recommendations.append(evaluate_bet("Resultado: Empate", probs["draw"], match.odds.draw))
+        all_recommendations.append(evaluate_bet(f"Resultado: {match.away_team}", probs["away_win"], match.odds.away_win))
 
-        # Mercado Goles Totales (Ambos equipos)
-        rec_over = evaluate_bet(
-            "Más de 2.5 Goles (Ambos equipos)",
-            float(match_probs.get("over_2_5", 0.55)),
-            1.92,
-        )
-        all_recommendations.append(rec_over)
+        # 2. Doble Oportunidad
+        if is_river_home:
+            all_recommendations.append(evaluate_bet(f"Doble Oportunidad: {river_name} o Empate", probs["home_or_draw"], 1.14))
+        else:
+            all_recommendations.append(evaluate_bet(f"Doble Oportunidad: {river_name} o Empate", probs["away_or_draw"], 1.30))
 
-        # Mercado Córners Totales (Ambos equipos)
-        p_corners = float(corner_probs.get("over_9_5_corners", corner_probs.get("over_9_5", 0.53)))
-        rec_corners = evaluate_bet(
-            "Más de 9.5 Córners (Ambos equipos)",
-            p_corners,
-            1.88,
-        )
-        all_recommendations.append(rec_corners)
+        # 3. Goles Totales
+        all_recommendations.append(evaluate_bet("Total de goles: Más de 1.5", probs["over_1_5"], 1.32))
+        all_recommendations.append(evaluate_bet("Total de goles: Más de 2.5", probs["over_2_5"], 1.95))
+        all_recommendations.append(evaluate_bet("Total de goles: Más de 3.5", probs["over_3_5"], 3.40))
 
-        # Filtrar apuestas con EV+
-        ev_plus_bets = [
-            bet for bet in all_recommendations
-            if getattr(bet, "is_ev_positive", getattr(bet, "expected_value", 0.0) > 0.0)
-        ]
+        # 4. Ambos Equipos Anotarán
+        all_recommendations.append(evaluate_bet("Ambos equipos anotarán: Sí", probs["btts_yes"], 2.10))
+        all_recommendations.append(evaluate_bet("Ambos equipos anotarán: No", probs["btts_no"], 1.70))
 
-        # 3. Construcción del Same Game Parlay (match_id como 1er argumento)
-        sgp = build_same_game_parlay(match.match_id, all_recommendations)
+        # 5. Goles de River Plate
+        all_recommendations.append(evaluate_bet(f"Total de goles de {river_name}: Más de 1.5", probs["river_over_1_5"], 1.62))
+
+        # 6. Córners
+        all_recommendations.append(evaluate_bet("Total de córners: Más de 8.5", corner_probs["over_8_5_corners"], 1.50))
+        all_recommendations.append(evaluate_bet("Total de córners: Más de 9.5", corner_probs["over_9_5_corners"], 1.85))
+
+        # 7. Tarjetas y Faltas
+        all_recommendations.append(evaluate_bet("Total de tarjetas: Más de 4.5", disc_probs["over_4_5_cards"], 1.80))
+        all_recommendations.append(evaluate_bet("Total de faltas: Más de 24.5", disc_probs["over_23_5_fouls"], 1.75))
+
+        # 8. Margen de Victoria
+        all_recommendations.append(evaluate_bet(f"Margen de victoria: {river_name} por 2 o más", probs["margin_river_2plus"], 2.25))
+
+        # Construcción del ticket (Simple o SGP con cuota >= 3.00)
+        sgp = build_same_game_parlay(match.match_id, all_recommendations, min_odds_floor=3.00)
 
         return {
             "match_id": match.match_id,
             "match": match,
-            "poisson_probabilities": match_probs,
+            "poisson_probabilities": probs,
             "corner_probabilities": corner_probs,
+            "discipline_probabilities": disc_probs,
             "all_recommendations": all_recommendations,
-            "ev_plus_bets": ev_plus_bets,
             "same_game_parlay": sgp,
         }
     except Exception as e:
-        logger.error(f"Error al analizar el partido {match.match_id}: {e}")
+        logger.error(f"Error al analizar partido {match.match_id}: {e}")
         raise
