@@ -1,9 +1,11 @@
 """
-Módulo principal del Bot de Telegram para análisis cuantitativo y gestión de apuestas.
+Módulo principal del Bot de Telegram con servidor HTTP embebido para Render y UptimeRobot.
 """
 
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -22,7 +24,36 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# COMANDOS PRINCIPALES
+# SERVIDOR HTTP DE SALUD (Render & UptimeRobot)
+# ---------------------------------------------------------------------------
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot Cuantitativo River Plate Online - 200 OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        # Silenciar logs recurrentes de UptimeRobot
+        return
+
+
+def start_health_check_server():
+    """Inicia un servidor HTTP en segundo plano para responder a UptimeRobot y Render."""
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"Servidor de Health Check iniciado en el puerto {port}")
+    server.serve_forever()
+
+
+# ---------------------------------------------------------------------------
+# COMANDOS DE TELEGRAM
 # ---------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -92,7 +123,7 @@ async def registrar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ La cuota y el monto deben ser números válidos (ejemplo: `8.50 15`).")
             return
 
-        # Guardado seguro en base de datos (Supabase)
+        # Guardado seguro en Supabase
         success = False
         try:
             if hasattr(tracker, "registrar_apuesta"):
@@ -219,18 +250,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# INICIALIZACIÓN DEL BOT
+# INICIALIZACIÓN
 # ---------------------------------------------------------------------------
 
 def run_bot():
-    """Configura e inicia el listener de Telegram."""
+    """Inicia el servidor HTTP de salud y el listener de Telegram."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("No se encontró la variable de entorno TELEGRAM_BOT_TOKEN.")
 
+    # Iniciar servidor HTTP en un hilo independiente para Render y UptimeRobot
+    threading.Thread(target=start_health_check_server, daemon=True).start()
+
     app = Application.builder().token(token).build()
 
-    # Registro de handlers
+    # Handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("ayuda", start_command))
     app.add_handler(CommandHandler("cuotas", cuotas_command))
