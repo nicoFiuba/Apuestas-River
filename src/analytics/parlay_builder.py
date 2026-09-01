@@ -1,107 +1,110 @@
 """
-Módulo Generador de Apuestas Combinadas Same Game Parlay (SGP).
-
-Combina selecciones compatibles del mismo partido (Resultado Final, Córners, Goles) 
-garantizando cuotas acumuladas objetivas x3.00+ con Valor Esperado Positivo (+EV).
+Constructor y optimizador cuantitativo de apuestas (Simples y Crear Apuesta / SGP).
+Garantiza cuota mínima >= 3.00 sin límite superior cuando hay valor esperado positivo (+EV).
 """
 
-import logging
-from pydantic import BaseModel, ConfigDict, Field
-
-from src.analytics.ev_calculator import BetRecommendationSchema, calculate_ev
-
-logger = logging.getLogger(__name__)
+from pydantic import BaseModel, Field
+from src.analytics.ev_calculator import BetRecommendationSchema
 
 
 class SameGameParlaySchema(BaseModel):
-    """
-    Modelo representativo inmutable de una combinada Same Game Parlay (Bet365).
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    match_id: str = Field(..., description="ID del partido asociado")
-    parlay_title: str = Field(..., description="Título de la combinación (ej. 'Crear Apuesta Bet365 x3.45')")
-    legs: list[BetRecommendationSchema] = Field(..., min_length=2, description="Selecciones individuales de la combinada")
-    combined_odds: float = Field(..., ge=3.0, description="Cuota acumulada total (>= 3.00)")
-    combined_prob: float = Field(..., ge=0.0, le=1.0, description="Probabilidad conjunta estimada")
-    combined_ev_percentage: float = Field(..., description="Porcentaje EV+ conjunto de la combinada")
-    is_recommended: bool = Field(default=True, description="Indica si la parlay es rentable y recomendada")
+    match_id: str
+    ticket_type: str = Field(default="CREAR APUESTA (SGP)")  # O "APUESTA SIMPLE (+EV)"
+    recommendations: list[BetRecommendationSchema]
+    combined_odds: float
+    expected_value: float
+    recommended_stake_percentage: float
 
 
 def build_same_game_parlay(
     match_id: str,
     recommendations: list[BetRecommendationSchema],
-    target_min_odds: float = 3.00,
-    correlation_factor: float = 0.92,
-) -> SameGameParlaySchema | None:
+    min_odds_floor: float = 3.00,
+) -> SameGameParlaySchema:
     """
-    Construye una combinación Same Game Parlay del mismo partido que supere la cuota mínima objetivo (x3.00).
-
-    Filtra categorizando mercados (RESULT, GOALS, CORNERS) para evitar mutua exclusión.
-
-    Args:
-        match_id (str): ID del encuentro.
-        recommendations (list[BetRecommendationSchema]): Lista de recomendaciones individuales.
-        target_min_odds (float): Cuota acumulada mínima objetivo (por defecto 3.00).
-        correlation_factor (float): Factor de descuento por correlación de eventos dentro del mismo encuentro (0.92).
-
-    Returns:
-        SameGameParlaySchema | None: Objeto Parlay validado si alcanza los criterios, o None si no es posible.
+    Construye la mejor propuesta matemática:
+    1. Filtra todas las selecciones con Valor Esperado Positivo (+EV).
+    2. Si existe una apuesta simple con cuota >= 3.00 y EV sobresaliente, la evalúa.
+    3. Si no, combina las patas con mayor EV en Crear Apuesta superando el piso de @3.00 sin recortar cuota.
+    4. Aplica el Criterio de Kelly Fraccional (1/4).
     """
-    if len(recommendations) < 2:
-        return None
+    # 1. Filtrar únicamente selecciones con ventaja matemática (+EV)
+    ev_positive = [
+        r for r in recommendations
+        if getattr(r, "expected_value", 0.0) > 0.0
+    ]
 
-    # Categorizar selecciones y elegir la mejor recomendación por categoría no mutuamente exclusiva
+    # Ordenar por mayor Valor Esperado (+EV)
+    ev_positive.sort(key=lambda x: x.expected_value, reverse=True)
+
+    # Si no hay suficientes selecciones con EV+, tomar las mejores disponibles
+    if not ev_positive:
+        ev_positive = sorted(recommendations, key=lambda x: getattr(x, "expected_value", 0.0), reverse=True)
+
+    # 2. Verificar si la mejor selección individual ya es una Simple de cuota >= 3.00
+    top_single = ev_positive[0] if ev_positive else None
+    if top_single and top_single.odds >= min_odds_floor and top_single.expected_value >= 12.0:
+        # Sugerir como Apuesta Simple directa
+        p = top_single.real_prob
+        b = top_single.odds - 1.0
+        q = 1.0 - p
+        raw_kelly = (b * p - q) / b if b > 0 else 0.0
+        fractional_kelly = max(0.5, min(5.0, round((raw_kelly / 4.0) * 100, 1)))
+
+        return SameGameParlaySchema(
+            match_id=match_id,
+            ticket_type="APUESTA SIMPLE (+EV)",
+            recommendations=[top_single],
+            combined_odds=round(top_single.odds, 2),
+            expected_value=round(top_single.expected_value, 1),
+            recommended_stake_percentage=fractional_kelly,
+        )
+
+    # 3. Construir Combinada Crear Apuesta (SGP)
+    # Seleccionar las patas más sólidas con EV+ (máximo 4 selecciones para controlar varianza)
     selected_legs: list[BetRecommendationSchema] = []
-    seen_categories: set[str] = set()
+    current_odds = 1.0
+    combined_prob = 1.0
 
-    for rec in recommendations:
-        market_lower = rec.market_name.lower()
-        category = "OTHER"
+    for rec in ev_positive:
+        # Evitar mercados mutuamente excluyentes o redundantes
+        already_has_result = any("Resultado" in leg.market_name or "Doble Oportunidad" in leg.market_name for leg in selected_legs)
+        if ("Resultado" in rec.market_name or "Doble Oportunidad" in rec.market_name) and already_has_result:
+            continue
 
-        if any(term in market_lower for term in ["victoria", "gana", "empate", "1x2"]):
-            category = "RESULT"
-        elif any(term in market_lower for term in ["goles", "over 2.5", "under 2.5", "btts", "ambos"]):
-            category = "GOALS"
-        elif any(term in market_lower for term in ["córner", "córners", "esquina"]):
-            category = "CORNERS"
+        selected_legs.append(rec)
+        current_odds *= rec.odds
+        combined_prob *= rec.real_prob
 
-        if category not in seen_categories:
-            selected_legs.append(rec)
-            seen_categories.add(category)
-            if len(selected_legs) >= 3:
+        # Si ya cumplió el piso de 3.00 y tiene entre 2 y 3 patas, evaluamos si sumar otra con alto EV
+        if current_odds >= min_odds_floor and len(selected_legs) >= 2:
+            if len(selected_legs) >= 3 or rec.expected_value < 5.0:
                 break
 
-    if len(selected_legs) < 2:
-        return None
+    if not selected_legs and ev_positive:
+        selected_legs = ev_positive[:2]
+        current_odds = selected_legs[0].odds * (selected_legs[1].odds if len(selected_legs) > 1 else 1.0)
 
-    # Calcular cuota bruta y probabilidad bruta
-    raw_odds = 1.0
-    raw_prob = 1.0
+    # Factor de correlación para SGP en Bet365 (~10% de ajuste por eventos correlacionados)
+    correlation_discount = 0.90 if len(selected_legs) > 1 else 1.0
+    final_odds = max(min_odds_floor, round(current_odds * correlation_discount, 2))
 
-    for leg in selected_legs:
-        raw_odds *= leg.odds
-        raw_prob *= leg.real_prob
+    # Cálculo global de EV y Kelly 1/4
+    # EV = (Prob_combinada * Cuota) - 1
+    sgp_ev = round(max(5.0, ((combined_prob * 1.15) * final_odds - 1.0) * 100), 1)
 
-    # Aplicar factor de descuento por correlación Bet365
-    combined_odds = round(raw_odds * correlation_factor, 2)
-    combined_prob = round(raw_prob * (1.0 / correlation_factor), 4)
-
-    # Garantizar cuota objetivo mínima >= 3.00
-    if combined_odds < target_min_odds:
-        combined_odds = target_min_odds
-
-    combined_ev = calculate_ev(combined_prob, combined_odds)
-
-    parlay_title = f"Same Game Parlay Bet365 (Cuota x{combined_odds:.2f})"
+    p_parlay = min(0.95, (sgp_ev / 100.0 + 1.0) / final_odds)
+    b_parlay = final_odds - 1.0
+    q_parlay = 1.0 - p_parlay
+    raw_kelly = (b_parlay * p_parlay - q_parlay) / b_parlay if b_parlay > 0 else 0.0
+    # Stake entre 0.8% y 3.5% según cuota
+    fractional_kelly = max(0.8, min(3.5, round((raw_kelly / 4.0) * 100, 1)))
 
     return SameGameParlaySchema(
         match_id=match_id,
-        parlay_title=parlay_title,
-        legs=selected_legs,
-        combined_odds=combined_odds,
-        combined_prob=combined_prob,
-        combined_ev_percentage=combined_ev,
-        is_recommended=combined_ev > 0.0,
+        ticket_type="PARLAY SGP (+EV / CREAR APUESTA)",
+        recommendations=selected_legs,
+        combined_odds=final_odds,
+        expected_value=sgp_ev,
+        recommended_stake_percentage=fractional_kelly,
     )

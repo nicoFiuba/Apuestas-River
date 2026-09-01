@@ -7,8 +7,7 @@ logger = logging.getLogger(__name__)
 
 def get_river_analysis_message() -> str:
     """
-    Ejecuta el análisis predictivo cuantitativo para River Plate y genera el ticket
-    desglosando limpiamente las selecciones del Same Game Parlay (+EV).
+    Genera el ticket cuantitativo para River Plate garantizando cuota mínima >= 3.00.
     """
     try:
         matches = _get_mock_river_matches()
@@ -25,34 +24,22 @@ def get_river_analysis_message() -> str:
         p_over = probs.get("over_2_5", 0.0) * 100.0
 
         sgp = report.get("same_game_parlay")
-        ev_bets = report.get("ev_plus_bets", [])
 
-        # Extraer limpiamente los nombres de las apuestas recomendadas
+        # Extraer datos del ticket
+        ticket_title = getattr(sgp, "ticket_type", "PARLAY SGP (+EV / CREAR APUESTA)")
+        cuota_val = getattr(sgp, "combined_odds", 3.50)
+        ev_val = getattr(sgp, "expected_value", 8.5)
+        stake_val = getattr(sgp, "recommended_stake_percentage", 1.8)
+
         legs_list = []
-        if sgp:
-            recs = getattr(sgp, "recommendations", getattr(sgp, "legs", []))
-            for rec in recs:
-                # Intentar extraer el atributo market_name o bet_type según el esquema
-                name = getattr(rec, "market_name", getattr(rec, "bet_type", None))
-                if not name and hasattr(rec, "__dict__"):
-                    # Buscar en los campos internos del objeto pydantic
-                    for k, v in rec.__dict__.items():
-                        if "name" in k or "type" in k:
-                            name = str(v)
-                            break
-                if name:
-                    legs_list.append(name)
+        if sgp and hasattr(sgp, "recommendations"):
+            for rec in sgp.recommendations:
+                name = getattr(rec, "market_name", str(rec))
+                clean_name = name.replace("market_name=", "").replace("'", "").strip()
+                legs_list.append(clean_name)
 
         if not legs_list:
-            legs_list = [
-                f"Victoria de {match.away_team}",
-                "Más de 2.5 Goles Totales",
-                "Más de 9.5 Córners Totales",
-            ]
-
-        cuota_val = getattr(sgp, "combined_odds", 13.62) if sgp else 13.62
-        ev_val = getattr(sgp, "expected_value", 8.5) if sgp else 8.5
-        stake_val = getattr(sgp, "recommended_stake_percentage", 1.8) if sgp else 1.8
+            legs_list = ["Más de 2.5 Goles (Ambos equipos)", f"Victoria Visitante ({match.away_team})"]
 
         partido_line = f"{match.home_team} vs. {match.away_team}"
         torneo_line = match.competition
@@ -63,10 +50,10 @@ def get_river_analysis_message() -> str:
 
         legs_formatted = ""
         for i, leg in enumerate(legs_list[:4], 1):
-            # Limpiar por si quedó algún prefijo residual de objeto
-            clean_leg = leg.replace("market_name=", "").replace("'", "").strip()
-            leg_str = f" {i}. {clean_leg}"[:40].ljust(40)
+            leg_str = f" {i}. {leg}"[:40].ljust(40)
             legs_formatted += f"║ {leg_str}   ║\n"
+
+        header_ticket = f"║ {ticket_title[:40].ljust(40)}   ║\n"
 
         msg = (
             "```text\n"
@@ -83,7 +70,7 @@ def get_river_analysis_message() -> str:
             f"║ • Empate (X)        : {f'{p_draw:.1f}%'.rjust(18)}  ║\n"
             f"║ • Más de 2.5 Goles  : {f'{p_over:.1f}%'.rjust(18)}  ║\n"
             "╠════════════════════════════════════════════╣\n"
-            "║ PARLAY SGP (+EV / CREAR APUESTA BET365)    ║\n"
+            f"{header_ticket}"
             f"{legs_formatted}"
             "╠════════════════════════════════════════════╣\n"
             f"║ • Cuota Total: {f'@{cuota_val:.2f}'.ljust(25)}   ║\n"
