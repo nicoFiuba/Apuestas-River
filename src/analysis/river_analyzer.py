@@ -3,7 +3,7 @@ Módulo de análisis predictivo cuantitativo para River Plate (Poisson & SGP).
 """
 
 import logging
-from src.data.api_client import _get_mock_river_matches
+from src.data.api_client import fetch_river_next_match
 from src.services.engine_service import analyze_single_match
 
 logger = logging.getLogger(__name__)
@@ -14,11 +14,11 @@ def get_river_analysis_message() -> str:
     Genera el reporte cuantitativo para River Plate con formato limpio tipo tarjeta.
     """
     try:
-        matches = _get_mock_river_matches()
-        if not matches:
-            return "⚠️ No hay partidos programados de River Plate para analizar."
+        # Llamada a la API real para obtener el próximo partido
+        match = fetch_river_next_match()
+        if not match:
+            return "⚠️ No hay partidos programados de River Plate en los próximos días."
 
-        match = matches[0]
         report = analyze_single_match(match)
 
         probs = report.get("poisson_probabilities", {})
